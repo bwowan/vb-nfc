@@ -1,248 +1,140 @@
 import sys
+import time 
+import queue
 import threading
-import smartcard.util
 import smartcard.System
 from enum                      import Enum
 from smartcard.CardRequest     import CardRequest
 from smartcard.CardMonitoring  import CardMonitor, CardObserver
-from smartcard.ATR             import ATR
+from smartcard.CardConnection  import CardConnection
 
-#import time
-#from smartcard.CardType        import CardType
-#from smartcard.pcsc.PCSCReader import PCSCReader
-#from smartcard.CardType        import AnyCardType
-#from smartcard.CardConnection  import CardConnection
+import card_data
+import do_prompt
+import do_wr
 
 
-MIFARE_1K_blocks_per_sector = 4
-MIFARE_1K_total_sectors     = 16
-MIFARE_1K_bytes_per_block   = 16
-MIFARE_1K_bytes_per_key     = 6
-MIFARE_1K_default_key       = [0xFF for _ in range(MIFARE_1K_bytes_per_key)] 
+TIME_TO_WAIT_CARD = 12
 
-def bytes2str(b):
-    s = ""
-    for i,ch in enumerate(b):
-        s += f"{ch:02X}"
-        if (i + 1 < len(b)):
-            s += " "
-    return "["+s+"]"
-    
-class status(Enum):
-    NOINIT     = "NO INIT"
-    OK         = "OK"
-    NOT_READ   = "NOT READ"
-    AUTH_ERROR = "AUTH ERROR"
-    READ_ERROR = "READ ERROR"
-    WRITE_ERROR= "WRITE ERROR"
-    KEY_ERROR  = "KEY ERROR"
-    NO_READERS = "NO READERS"
+readers = []
 
-def parseAccessBits(b6, b7):
-    b6 ^= 0xFF #C23│C22│C21│C20│C13│C12│C11│C10 (7-1)
-    b7 ^= 0xFF #C33│C32│C31│C30│C23│C22│C21│C20
-    #b8 ^= 0xFF #~C13│~C12│~C11│~C10│~C33│~C32│~C31│~C30│ it's checking byte that duplicate info
-    blockAcess=bytearray(MIFARE_1K_blocks_per_sector)
-    blockAcess[0] = ( (b6       & 0x01)  << 2) | ( (b7       & 0x01) < 1) | ((b7 >> 4) & 0x01)
-    blockAcess[1] = (((b6 >> 1) & 0x01)  << 2) | (((b7 >> 1) & 0x01) < 1) | ((b7 >> 5) & 0x01)
-    blockAcess[2] = (((b6 >> 2) & 0x01)  << 2) | (((b7 >> 2) & 0x01) < 1) | ((b7 >> 6) & 0x01)
-    blockAcess[3] = (((b6 >> 3) & 0x01)  << 2) | (((b7 >> 3) & 0x01) < 1) | ((b7 >> 7) & 0x01)
-    return blockAcess
-    
-bitAccessMap = {
-    0b000: "R(A,B) W(A,B) I(A,B) D(A,B)",
-    0b001: "R(A,B) W(B,B) I(-) D(-)",
-    0b010: "R(A,B) W(B) I(A,B) D(A,B)",
-    0b011: "R(B) W(B) I(-) D(-)",
-    0b100: "R(A,B) W(B) I(A,B) D(A,B)",
-    0b101: "R(B) W(-) I(-,B) D(-,B)",
-    0b110: "R(A,B) W(-,B) I(-) D(-)",
-    0b111: "R(A,B) W(-) I(-) D(-)"
-} 
-
-def accessBitsToStr(accessBytes):
-    blockAcess = parseAccessBits(accessBytes[0], accessBytes[1])
-    resultStrBlocks = [""  for _ in range(MIFARE_1K_blocks_per_sector)]
-    for i in range(MIFARE_1K_blocks_per_sector):
-        resultStrBlocks[i] = bitAccessMap.get(blockAcess[i])
-    return resultStrBlocks  
+class actionsResponce(Enum):
+    A_RESPONCE_OK       = "done"
+    A_RESPONCE_FAIL     = "fail"
 
 
-#full dump data for Mifare 1k card
-class dumpMifare_1k:
-    #data of each block
-    class block:            
-        def __init__(self):
-            self.data   = bytearray(MIFARE_1K_bytes_per_block)
-            self.status = status.NOINIT
-
-    #data of block 0 of secor 0
-    class head:
-        def __init__(self):
-            self.UID  = bytearray(4)  #(0-3) first 4 bytes (unique ID of card)
-            self.BCC  = 0x00          #(4-4) 4th byte (ecc of UID)
-            self.SAK  = bytearray(3)  #(5-7) bytes of block 0 (fabricant data)
-            self.SIGN = bytearray(8)  #(7-15)last 8 bytes (sign of manufacturer)
-
-        def read(self, block):
-            if block.status == status.OK:
-                self.UID  = block.data[0:4]
-                self.BCC  = block.data[4]
-                self.SAK  = block.data[5:8]
-                self.SIGN = block.data[8:16]
-        
-        def toStr(self):
-            return f"UID:{bytes2str(self.UID)} BCC[0x{self.BCC:02X}] SAK:{bytes2str(self.SAK)} SIGN:{bytes2str(self.SIGN)}"
-
-    #data of trailer block (3) of each sector
-    class trailer:
-        def __init__(self):
-            self.keyA       = MIFARE_1K_default_key #default key for many cards
-            self.keyB       = MIFARE_1K_default_key #default key for many cards
-            self.accessBits = bytearray(3)
-            self.GPB        = 0x00                  #General Purpose Byte
-            self.status     = status.NOINIT
-            
-        def processLastBlock(self, data):
-            #self.keyA      = data[0:6] #always zero, keyA is unreadable
-            self.accessBits = data[6:9]
-            self.GPB        = data[9]
-            self.keyB       = data[10:16]
-            self.status     = status.OK
-        
-        def toStr(self):
-            return f"KeyB: {bytes2str(self.keyB)} GPB:{self.GPB:02X} AccessBits:{bytes2str(self.accessBits)}"
-
-    #data of entire sector     
-    class sector:
-        def __init__(self):
-            self.blocks  = [dumpMifare_1k.block() for _ in range(MIFARE_1K_blocks_per_sector)]
-            self.trailer = dumpMifare_1k.trailer()
-            self.status  = status.NOINIT
-    
-    def __init__(self):
-        self.head    = dumpMifare_1k.head()
-        self.sectors = [dumpMifare_1k.sector() for _ in range(MIFARE_1K_total_sectors)]
-        self.status  = status.NOINIT
-        
-#send request to card
-def doTransmit(connection, Key):
-    try:
-        response, sw1, sw2 = connection.transmit(Key)
-        if (sw1 == 0x90) and (sw2 == 0x00):
-            return True, response
-    except Exception as e:
-        print(f"transmit error: {e}")
-    return False
-
-#print all read info
-def printDump(dump, firstSectorOnly = True, fullData = True):
-    print(dump.head.toStr())
-    for iSector, sector in enumerate(dump.sectors):
-        print(f"sector {iSector:02d} {sector.status.value}; {sector.trailer.toStr()}")
-        accessBitsStr = accessBitsToStr(sector.trailer.accessBits)
-        if fullData:
-            for iBlock, block in enumerate(sector.blocks):
-                s = f" {iBlock:02d} {block.status.value}"
-                if block.status == status.OK:
-                    if fullData:
-                        s += f" {smartcard.util.toHexString(block.data)}"
-                    s += f" access: {accessBitsStr[iBlock]}"
-                print(s)
-        if (firstSectorOnly):
-            break
-    return
-
-#read all card info
-def dump_mifare_1k(dump, connection, firstSectorOnly=True, keyA = MIFARE_1K_default_key):
-    try:
-        totalFailCount = 0
-        for iSector, sector in enumerate(dump.sectors):
-            nBlock0 = iSector * 4
-            # load key A (default)
-            if not doTransmit(connection, [0xFF, 0x82, 0x00, 0x00, 0x06] + keyA):
-                sector.status = status.KEY_ERROR
-                totalFailCount += 1
-            else:
-                # auntificate by key A
-                if not doTransmit(connection, [0xFF, 0x86, 0x00, 0x00, 0x05, 0x01, 0x00, nBlock0, 0x60, 0x00]):
-                    sector.status = status.AUTH_ERROR
-                    totalFailCount += 1
-                else:
-                    failCount = 0
-                    sector.status = status.OK
-                    for iBlock, block in enumerate(sector.blocks):
-                        readOk, data = doTransmit(connection, [0xFF, 0xB0, 0x00, nBlock0 + iBlock, 0x10])
-                        if readOk:
-                            block.data = data
-                            block.status = status.OK
-                            if (iBlock + 1) == MIFARE_1K_blocks_per_sector:
-                                sector.trailer.processLastBlock(block.data)   
-                        else:
-                            failCount += 1
-                            totalFailCount += 1
-                            block.status = status.READ_ERROR
-                    if failCount != 0:
-                        sector.status = status.READ_ERROR
-            if firstSectorOnly: #read only first block of first sector
-                break
-                        
-        dump.head.read(dump.sectors[0].blocks[0])
-    except Exception as e:
-        dump.status = status.READ_ERROR
-        print(f"dump error: {e}")
-    return
-
-        
 #=================================
-def sendRequest(firstSectorOnly=True):
-    crdRequest = CardRequest(timeout=10)
-    crdService = crdRequest.waitforcard()
-    try:
-        connection=crdService.connection
-        connection.connect(mode=smartcard.scard.SCARD_SHARE_EXCLUSIVE, disposition=smartcard.scard.SCARD_UNPOWER_CARD)
-        #atr = ATR(connection.getATR())
-        #atr.dump();
-        dump = dumpMifare_1k()
-        dump.reader = readers[0].name
-        dump_mifare_1k(dump, connection, firstSectorOnly) 
-        printDump(dump, firstSectorOnly)
-    except Exception as e:
-        print (f"{e}")
-    finally:
-        connection.disconnect()
+class CardProcessor():
+    class processData():
+        def __init__(self) -> None:
+            self.sectorIndex = -1
+            self.blockIndex  = -1
+            self.key         = card_data.MIFARE_1K_default_key
+            self.blockData   = bytearray(card_data.MIFARE_1K_bytes_per_block)
+
+    class LocalCardObeserver(CardObserver):
+        def __init__(self, insertEvent: threading.Event) -> None:
+            super().__init__()
+            self.insertEvent = insertEvent
+            self.monitor     = CardMonitor()
+            self.ATR         = bytearray(0)           
+
+        #callback function for smartcard library (background thread)
+        def update(self, observable, handlers) -> None:
+            inserted, removed = handlers
+            if len(inserted) != 0: #we have a card inserted
+                sys.stdout.write(f"\rInserted: {card_data.bytes2str(inserted[0].atr)}\n")
+                self.insertEvent.set()
+            if len(removed) != 0:
+                self.insertEvent.clear()
+                sys.stdout.write(f"\rRemoved: {card_data.bytes2str(removed[0].atr)}\n")
 
 
-class PrintObserver(CardObserver):
-    def __init__(self):
-        self.processedEvent =  threading.Event()
+        def waitForConnection(self):
+            self.insertEvent.wait(timeout=1)
+            if self.insertEvent.is_set():
+                try:
+                    cardRequest    = CardRequest(timeout=1)
+                    cardService    = cardRequest.waitforcard()
+                    cardConnection = cardService.connection
+                    cardConnection.connect(mode=smartcard.scard.SCARD_SHARE_EXCLUSIVE, disposition=smartcard.scard.SCARD_UNPOWER_CARD)
+                    self.ATR = cardConnection.getATR()
+                    return True, cardRequest, cardService, cardConnection
+                except Exception as e:
+                    sys.stdout.write(f"\nConnection error {e}\n")
+            else:
+                sys.stdout.write("\rconnection timeout            ")
+            return False, None, None, None
 
-    def update(self, observable, handlers):
-        if len(handlers[0]) != 0:
-            print("\rInserted: ", bytes2str(handlers[0][0].atr))
-            sendRequest()
-            self.processedEvent.set()
+
+    #main service thread loop
+    def process(self) -> None: #loop of main thread
+        self.observer = CardProcessor.LocalCardObeserver(self.cardInsertedEvent)
+        try:
+            doContinue = True
+            while doContinue:
+                self.responceQueue.join()
+                msg = self.messageQueue.get()
+                match msg:
+                    case do_prompt.actions.A_QUIT:
+                        doContinue = False
+                        self.responceQueue.put(actionsResponce.A_RESPONCE_OK)
+
+                    case do_prompt.actions.A_READ:
+                        Result, cardRequest, cardService, cardConnection = self.observer.waitForConnection()
+                        if Result:
+                            Result = do_wr.fnReadMifare1k(self.dump, cardConnection)
+                            cardConnection.disconnect()
+                        self.responceQueue.put(actionsResponce.A_RESPONCE_OK if Result else actionsResponce.A_RESPONCE_FAIL)
+
+                    case do_prompt.actions.A_WRITE:
+                        do_wr.fnWriteBlock(1, )
+ 
+                self.messageQueue.task_done()
+        except Exception as e:
+            print(f"{e}")
             
+            
+    def __init__(self) -> None:
+        self.messageQueue     = queue.Queue(maxsize=2)
+        self.responceQueue    = queue.Queue(maxsize=2)
+        self.dump             = card_data.dumpMifare_1k()
+        self.dataToProcess    = CardProcessor.processData()
+        self.cardInsertedEvent= threading.Event()        
+        self.selfTask         = threading.Thread(target=self.process, daemon=True)
+        self.writeData        = do_prompt.PromptAnswer_ForWrite()
 
-def observerThread(observer):
-    monitor = CardMonitor()
-    monitor.addObserver(observer)
-    try:
-        n = 12
-        while n > 0 and not observer.processedEvent.is_set():
-            n -= 1
-            sys.stdout.write(f"\rwaiting for card {n:02d}")
-            observer.processedEvent.wait(timeout=1)
-    finally:
-        monitor.deleteObserver(observer)
-        
-def startObserver():
-    observer = PrintObserver()
-    t = threading.Thread(target=observerThread, daemon=True, args=(observer,))
-    t.start()
-    t.join()
-    if not observer.processedEvent.is_set():
-        print("\rtimeout...                        ")
+
+#waiting while ervice thread process it's queue
+def fnWaitForResponce(queueResponce: queue.Queue) -> bool:
+    nWaitStr = 0
+    waitStr = ["( )", "(.)", "(-)", "(+)", "(-)", "(.)"]
+    while queueResponce.empty():
+        if nWaitStr >= len(waitStr)  or  nWaitStr < 0:
+            nWaitStr = 0
+        sys.stdout.write(f"\roperation waiting  {waitStr[nWaitStr]}")
+        time.sleep(0.3)
+        nWaitStr += 1
+    Result = queueResponce.get() == actionsResponce.A_RESPONCE_OK
+    queueResponce.task_done()
+    return Result
+
+
+def printWaiting(e: threading.Event, s=" "):
+    if not e.is_set():
+        sys.stdout.write(f"\rwaiting or card {s}")
+        time.sleep(0.4)
+
+def WaitForCard(e: threading.Event):
+    nWaitStr = 0
+    waitStr = ["( )", "(.)", "(-)", "(+)", "(-)", "(.)"]
+    sys.stdout.write("\n")
+    while not e.is_set():
+        time.sleep(0.3)
+        if nWaitStr >= len(waitStr)  or  nWaitStr < 0:
+            nWaitStr = 0
+        if not e.is_set():
+            sys.stdout.write(f"\rwaiting or card {waitStr[nWaitStr]}")
+        nWaitStr += 1
 
 
 ###################################################
@@ -252,5 +144,43 @@ if __name__ == "__main__":
         print("no readers")
     else:
         print(readers[0])
-        #sendRequest()
-        startObserver()
+        mainCardProcessor = CardProcessor()
+        mainCardProcessor.selfTask.start()
+        action = do_prompt.actions.A_READ
+
+        while mainCardProcessor.selfTask.is_alive():
+            if action == do_prompt.actions.A_READ  or action == do_prompt.actions.A_WRITE:
+                WaitForCard(mainCardProcessor.cardInsertedEvent)
+
+            match action:
+                case do_prompt.actions.A_READ:
+                    mainCardProcessor.messageQueue.put(do_prompt.actions.A_READ)
+                    fnWaitForResponce(mainCardProcessor.responceQueue)
+                    #card_data.fnWriteBlockStr(1,1,"wwwwwwwwwwwwwwww", mainCardProcessor.dump.sectors[1].trailer.keyB)
+
+                case do_prompt.actions.A_PRINT_SECTOR:
+                    nSector = do_prompt.fnPromptSectorIndex_FromTerminal(card_data.MIFARE_1K_total_sectors)
+                    card_data.printSector(nSector, mainCardProcessor.dump.sectors[nSector])
+
+                case do_prompt.actions.A_WRITE:
+                    mainCardProcessor.writeData = do_prompt.fnAskDataToWrite(card_data.MIFARE_1K_total_sectors, card_data.MIFARE_1K_blocks_per_sector)
+                    if len(mainCardProcessor.writeData) > 0:
+                        mainCardProcessor.messageQueue.put(do_prompt.actions.A_WRITE)
+                        print()
+                    #if fnWriteBlockFromTerm():
+                    #    print("Consider re-reading the card to verify the write.")
+
+                case do_prompt.actions.A_PRINT_ALL:
+                    all_sectors = list(range(card_data.MIFARE_1K_total_sectors))
+                    card_data.printDump(mainCardProcessor.dump, sectors=all_sectors)
+
+                case do_prompt.actions.A_QUIT:
+                    mainCardProcessor.messageQueue.put(do_prompt.actions.A_QUIT)
+                    if fnWaitForResponce(mainCardProcessor.responceQueue):
+                        break
+
+            mainCardProcessor.messageQueue.join()
+            action = do_prompt.fnPromptUserAction_FromTerminal()
+
+        sys.stdout.write("\rgood by\n\n")
+
