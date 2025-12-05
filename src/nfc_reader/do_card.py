@@ -17,10 +17,13 @@ TIME_TO_WAIT_CARD = 12
 
 readers = []
 
-class actionsResponce(Enum):
+class actResponce(Enum):
     A_RESPONCE_OK       = "done"
     A_RESPONCE_FAIL     = "fail"
 
+    @staticmethod
+    def fromBool(isOk:bool) -> "actResponce":
+        return actResponce.A_RESPONCE_OK if isOk else actResponce.A_RESPONCE_FAIL
 
 #=================================
 class CardProcessor():
@@ -36,7 +39,8 @@ class CardProcessor():
             super().__init__()
             self.insertEvent = insertEvent
             self.monitor     = CardMonitor()
-            self.ATR         = bytearray(0)           
+            self.ATR         = bytearray(0)
+            self.monitor.addObserver(self)
 
         #callback function for smartcard library (background thread)
         def update(self, observable, handlers) -> None:
@@ -66,6 +70,13 @@ class CardProcessor():
             return False, None, None, None
 
 
+    def executeCommunication(self, operation: callable):  
+        isOkConnection, cardRequest, cardService, cardConnection = self.observer.waitForConnection()
+        isOkResult = isOkConnection and operation(cardConnection)
+        isOkConnection and cardConnection.disconnect()
+        self.responceQueue.put(actResponce.fromBool(isOkResult))
+
+
     #main service thread loop
     def process(self) -> None: #loop of main thread
         self.observer = CardProcessor.LocalCardObeserver(self.cardInsertedEvent)
@@ -77,18 +88,15 @@ class CardProcessor():
                 match msg:
                     case do_prompt.actions.A_QUIT:
                         doContinue = False
-                        self.responceQueue.put(actionsResponce.A_RESPONCE_OK)
+                        self.observer.monitor.deleteObserver(self.observer)
+                        self.responceQueue.put(actResponce.A_RESPONCE_OK)
 
                     case do_prompt.actions.A_READ:
-                        Result, cardRequest, cardService, cardConnection = self.observer.waitForConnection()
-                        if Result:
-                            Result = do_wr.fnReadMifare1k(self.dump, cardConnection)
-                            cardConnection.disconnect()
-                        self.responceQueue.put(actionsResponce.A_RESPONCE_OK if Result else actionsResponce.A_RESPONCE_FAIL)
+                        self.executeCommunication(lambda conn: do_wr.fnRead(self.dump, conn, self.key))
 
                     case do_prompt.actions.A_WRITE:
-                        do_wr.fnWriteBlock(1, )
- 
+                        self.executeCommunication(lambda conn: do_wr.fnWrite(self.writeData, conn, self.key))
+
                 self.messageQueue.task_done()
         except Exception as e:
             print(f"{e}")
@@ -102,19 +110,11 @@ class CardProcessor():
         self.cardInsertedEvent= threading.Event()        
         self.selfTask         = threading.Thread(target=self.process, daemon=True)
         self.writeData        = do_prompt.PromptAnswer_ForWrite()
-
+        self.key              = card_data.key(card_data.keyType.KT_B)
 
 #waiting while ervice thread process it's queue
 def fnWaitForResponce(queueResponce: queue.Queue) -> bool:
-    nWaitStr = 0
-    waitStr = ["( )", "(.)", "(-)", "(+)", "(-)", "(.)"]
-    while queueResponce.empty():
-        if nWaitStr >= len(waitStr)  or  nWaitStr < 0:
-            nWaitStr = 0
-        sys.stdout.write(f"\roperation waiting  {waitStr[nWaitStr]}")
-        time.sleep(0.3)
-        nWaitStr += 1
-    Result = queueResponce.get() == actionsResponce.A_RESPONCE_OK
+    Result = queueResponce.get(block=True) == actResponce.A_RESPONCE_OK
     queueResponce.task_done()
     return Result
 
@@ -155,20 +155,20 @@ if __name__ == "__main__":
             match action:
                 case do_prompt.actions.A_READ:
                     mainCardProcessor.messageQueue.put(do_prompt.actions.A_READ)
-                    fnWaitForResponce(mainCardProcessor.responceQueue)
-                    #card_data.fnWriteBlockStr(1,1,"wwwwwwwwwwwwwwww", mainCardProcessor.dump.sectors[1].trailer.keyB)
+                    if fnWaitForResponce(mainCardProcessor.responceQueue):
+                        card_data.printSector(0, mainCardProcessor.dump.sectors[0])
 
                 case do_prompt.actions.A_PRINT_SECTOR:
-                    nSector = do_prompt.fnPromptSectorIndex_FromTerminal(card_data.MIFARE_1K_total_sectors)
-                    card_data.printSector(nSector, mainCardProcessor.dump.sectors[nSector])
+                    isOk, nSector = do_prompt.askSectorNumber_FromTerminal(card_data.MIFARE_1K_total_sectors)
+                    isOk and card_data.printSector(nSector, mainCardProcessor.dump.sectors[nSector])
 
                 case do_prompt.actions.A_WRITE:
-                    mainCardProcessor.writeData = do_prompt.fnAskDataToWrite(card_data.MIFARE_1K_total_sectors, card_data.MIFARE_1K_blocks_per_sector)
-                    if len(mainCardProcessor.writeData) > 0:
+                    isOk, mainCardProcessor.writeData = do_prompt.fnAskWrite(card_data.MIFARE_1K_total_sectors,
+                                                                             card_data.MIFARE_1K_blocks_per_sector,
+                                                                             card_data.MIFARE_1K_bytes_per_block)
+                    if isOk:
                         mainCardProcessor.messageQueue.put(do_prompt.actions.A_WRITE)
-                        print()
-                    #if fnWriteBlockFromTerm():
-                    #    print("Consider re-reading the card to verify the write.")
+                        fnWaitForResponce(mainCardProcessor.responceQueue)
 
                 case do_prompt.actions.A_PRINT_ALL:
                     all_sectors = list(range(card_data.MIFARE_1K_total_sectors))

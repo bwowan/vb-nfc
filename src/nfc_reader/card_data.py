@@ -59,6 +59,18 @@ def accessBitsToStr(accessBytes) -> [str]:
         resultStrBlocks[i] = bitAccessMap.get(blockAcess[i])
     return resultStrBlocks
 
+class keyType(Enum):
+    KT_A = "A"
+    KT_B = "B"
+
+class key:
+    def __init__(self, kType = keyType.KT_A, kData: list[bytes] = MIFARE_1K_default_key):
+        self.keyType = kType
+        self.keyData = kData
+
+    def toStr(self) -> str:
+        return f"{self.keyType.value}:{bytes2str(self.keyData)}"
+
 
 #full dump data for Mifare 1k card
 class dumpMifare_1k:
@@ -102,22 +114,22 @@ class dumpMifare_1k:
     #data of trailer block (3) of each sector
     class trailer:
         def __init__(self):
-            self.keyA       = MIFARE_1K_default_key #default key for many cards
-            self.keyB       = MIFARE_1K_default_key #default key for many cards
+            self.keyA       = key(keyType.KT_A) 
+            self.keyB       = key(keyType.KT_B) 
             self.accessBits = bytearray(3)
             self.GPB        = 0x00                  #General Purpose Byte
             self.status     = status.S_NOINIT
             
         def processLastBlock(self, data):
-            #self.keyA      = data[0:6] #always zero, keyA is unreadable
-            self.accessBits = data[6:9]
-            self.GPB        = data[9]
-            self.keyB       = data[10:16]
-            self.status     = status.S_OK
+            #self.keyA        = data[0:6] #always zero, keyA is unreadable
+            self.accessBits   = data[6:9]
+            self.GPB          = data[9]
+            self.keyB.keyData = data[10:16]
+            self.status       = status.S_OK
         
         def toStr(self) -> str:
             if self.status == status.S_OK:
-                return f"KeyB: {bytes2str(self.keyB)} GPB:{self.GPB:02X} AccessBits:{bytes2str(self.accessBits)}"
+                return f"{self.keyB.toStr()} GPB:{self.GPB:02X} AccessBits:{bytes2str(self.accessBits)}"
             else:
                 return "trailer not processed"
 

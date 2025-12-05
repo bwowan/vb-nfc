@@ -4,7 +4,7 @@ def bytes2str(b) -> str:
     return "[" + " ".join(f"{ch:02X}" for ch in b) + "]"
 
 
-def fnDoTransmit(connection, Key):
+def fnDoTransmit(connection, data: list[bytes]) -> (bool, list[bytes]):
     """
     Send an APDU (Application Protocol Data Unit) command to the NFC card.
     
@@ -40,13 +40,13 @@ def fnDoTransmit(connection, Key):
         # Transmit APDU command to card and receive response
         # response: data bytes returned by the card
         # sw1, sw2: status words indicating command result
-        response, sw1, sw2 = connection.transmit(Key)
+        response, sw1, sw2 = connection.transmit(data)
         # Check for success status (0x9000 = OK)
         if (sw1 == 0x90) and (sw2 == 0x00):
             return True, response
     except Exception as e:
         print(f"transmit error: {e}")
-    return False
+    return False, list[bytes]()
 
 
 def fnLoadKey(connection: CardConnection, keyData: list[bytes]) -> bool:
@@ -163,8 +163,6 @@ def fnReadBlock(connection: CardConnection, nBlockThrowCard: int, count: int = 0
     Returns:
         tuple: (True, response_data) if read succeeded, (False, None) otherwise
     """
-    # APDU: [CLA, INS, P1, BlockAddr, Le]
-    Result, responce = fnDoTransmit(connection, [0xFF, 0xB0, 0x00, nBlockThrowCard, count])
-    if not Result:
-        print(f"failed to read block: {nBlockThrowCard//4}:{nBlockThrowCard%4}")
-    return Result, responce
+    # APDU: [CLA, INS, P1, BlockAddr, Length]
+    #Result, responce = fnDoTransmit(connection, [0xFF, 0xB0, 0x00, nBlockThrowCard, count])
+    return fnDoTransmit(connection, [0xFF, 0xB0, 0x00, nBlockThrowCard])

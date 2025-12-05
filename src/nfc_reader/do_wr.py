@@ -7,10 +7,18 @@ import do_comm
 import card_data
 import do_prompt
 
-
+def printFailBlocks(nSector: int, sector: card_data.dumpMifare_1k.sector):
+    failBlocks = []
+    for iBlock, block in enumerate(sector.blocks):
+        if block.status != card_data.status.S_OK:
+            failBlocks.append(iBlock)
+    if len(failBlocks) > 0:
+        print(f"Sector[{nSector}]: fail blocks {failBlocks}")
+        
 ############################################################################################################
 #read all card info
-def fnReadMifare1k(dump: card_data.dumpMifare_1k, connection: CardConnection, key: card_data.key) -> bool:
+def fnRead(dump: card_data.dumpMifare_1k, connection: CardConnection, key: card_data.key) -> bool:
+    totalBlocksToRead = len(dump.sectors) * len(dump.sectors[0].blocks)
     totalFailCount    = 0
     totalBlocksRead   = 0
     try:
@@ -40,14 +48,14 @@ def fnReadMifare1k(dump: card_data.dumpMifare_1k, connection: CardConnection, ke
                             block.status = card_data.status.S_READ_ERROR
                     if failCount != 0:
                         sector.status = card_data.status.S_READ_ERROR
-                        
+                        printFailBlocks(iSector, sector)
         dump.head.read(dump.sectors[0].blocks[0])
     except Exception as e:
         dump.status = card_data.status.S_READ_ERROR
         print(f"dump error: {e}\n")
 
-    print("read {totalBlocksRead} blocks")
-    return totalBlocksRead > 0
+    print(f"read {totalBlocksRead}/{totalBlocksToRead})")
+    return totalBlocksRead == len(dump.sectors) * len(dump.sectors[0].blocks)
 
 
 ############################################################################################################
@@ -76,7 +84,7 @@ def fnWriteBlockStr(nSector: int, nBlock: int, blockDataStr: str, key: list[byte
     return fnWriteBlock(nSector, nBlock, list(blockDataStr.encode()), key)
 
 #==============================================================================================
-def fnWrite(writeData: do_prompt.PromptAnswer_ForWrite, key:card_data.key) -> bool:
+def fnWrite(writeData: do_prompt.PromptAnswer_ForWrite, connection: CardConnection, key:card_data.key) -> bool:
     """
     Write data to a MIFARE 1K card.
     
@@ -106,45 +114,39 @@ def fnWrite(writeData: do_prompt.PromptAnswer_ForWrite, key:card_data.key) -> bo
         case do_prompt.writeAddress.A_BLOCK : nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector + writeData.nBlock
         case do_prompt.writeAddress.A_SECTOR: nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector
 
-    Result = False
     try:
-        request = CardRequest(timeout=10)
-        service = request.waitforcard()
-        connection = service.connection
-        connection.connect(mode=smartcard.scard.SCARD_SHARE_EXCLUSIVE, disposition=smartcard.scard.SCARD_UNPOWER_CARD)        
-        try:
-            # Calculate absolute block number from start of card
-            nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector + writeData.nBlock #сквозной номер от начала карты
-            # Track if we're entering a new sector (requires authentication)
-            startNewSector = True
-            # Write each block of data
-            for i in range(dataLen // card_data.MIFARE_1K_bytes_per_block):
-                # Calculate absolute block number across entire card
-                nBlockThrowCard = nStartBlock + i
-                # Calculate which sector this block belongs to
-                nSector = nBlockThrowCard // card_data.MIFARE_1K_blocks_per_sector
-                # Calculate block number within the sector (0-3)
-                nBlockInsideSector = nBlockThrowCard % card_data.MIFARE_1K_blocks_per_sector
-                # If we're continuing in the same sector, no need to re-authenticate
-                isOk = not startNewSector
-                # If entering a new sector, authenticate with the key
-                if startNewSector:
-                    # Get first block of the sector (block 0 of the sector)
-                    nBlock0 = nSector * card_data.MIFARE_1K_blocks_per_sector
-                    # Load key and authenticate to the sector
-                    isOk = do_comm.fnLoadKey(connection, key.keyData) and do_comm.fnSelectBlock(connection, nBlock0, key.keyType.value)
-                # If authentication succeeded (or not needed), write the block
-                if isOk:
-                    # Extract block data from the write buffer
-                    blockData = writeData.data[i * card_data.MIFARE_1K_bytes_per_block:(i + 1) * card_data.MIFARE_1K_bytes_per_block]
-                    # Write the block to the card
-                    if do_comm.fnWriteBlock(connection, nBlockThrowCard, blockData):
-                        print(f"Successfully wrote block {nSector}:{nBlockInsideSector} --> {do_comm.bytes2str(blockData)}") 
-                # Check if next iteration will be in a new sector (if current block is last in sector)
-                startNewSector = nBlockInsideSector == (card_data.MIFARE_1K_blocks_per_sector - 1)
-        finally:
-            # Always disconnect from the card
-            connection.disconnect()
+        # absolute block number from start of card
+        nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector + writeData.nBlock #global block от начала карты
+        startNewSector = True # Track if we're entering a new sector (requires authentication)
+        totalBlocksToWrite = dataLen // card_data.MIFARE_1K_bytes_per_block 
+        totalBlockWritten = 0
+        # Write each block of data
+        for i in range(totalBlocksToWrite):
+            # Calculate absolute block number across entire card
+            nBlockThrowCard = nStartBlock + i
+            # Calculate which sector this block belongs to
+            nSector = nBlockThrowCard // card_data.MIFARE_1K_blocks_per_sector
+            # Calculate block number within the sector (0-3)
+            nBlockInsideSector = nBlockThrowCard % card_data.MIFARE_1K_blocks_per_sector
+            # If we're continuing in the same sector, no need to re-authenticate
+            isOk = not startNewSector
+            # If entering a new sector, authenticate with the key
+            if startNewSector:
+                # Get first block of the sector (block 0 of the sector)
+                nBlock0 = nSector * card_data.MIFARE_1K_blocks_per_sector
+                # Load key and authenticate to the sector
+                isOk = do_comm.fnLoadKey(connection, key.keyData) and do_comm.fnSelectBlock(connection, nBlock0, key.keyType.value)
+            # If authentication succeeded (or not needed), write the block
+            if isOk:
+                # Extract and write block data from the write buffer with convertation to list of bytes
+                blockDataSlice = list[bytes](writeData.data[i * card_data.MIFARE_1K_bytes_per_block:(i + 1) * card_data.MIFARE_1K_bytes_per_block])
+                # Write the block to the card
+                if do_comm.fnWriteBlock(connection, nBlockThrowCard, (blockDataSlice)):
+                    totalBlockWritten += 1
+                    print(f"Successfully wrote sector[{nSector}]:block[{nBlockInsideSector}] <-- {do_comm.bytes2str(blockDataSlice)}") 
+            # Check if next iteration will be in a new sector (if current block is last in sector)
+            startNewSector = nBlockInsideSector == (card_data.MIFARE_1K_blocks_per_sector - 1)
     except Exception as e:
         sys.stdout.write(f"Error writing block: {e}")
-    return Result
+
+    return totalBlocksToWrite == totalBlockWritten
