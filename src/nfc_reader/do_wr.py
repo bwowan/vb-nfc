@@ -35,7 +35,7 @@ def fnRead(dump: card_data.dumpMifare_1k, connection: CardConnection, key: card_
                     failCount = 0
                     sector.status = card_data.status.S_OK
                     for iBlock, block in enumerate(sector.blocks):
-                        readOk, data = do_comm.fnReadBlock(connection, nBlock0 + iBlock, card_data.MIFARE_1K_bytes_per_block)
+                        readOk, data = do_comm.fnReadBlock(connection, nBlock0 + iBlock)
                         if readOk:
                             block.data = data
                             block.status = card_data.status.S_OK

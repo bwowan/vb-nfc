@@ -46,7 +46,7 @@ def fnDoTransmit(connection, data: list[bytes]) -> (bool, list[bytes]):
             return True, response
     except Exception as e:
         print(f"transmit error: {e}")
-    return False, list[bytes]()
+    return False, None
 
 
 def fnLoadKey(connection: CardConnection, keyData: list[bytes]) -> bool:
@@ -141,7 +141,7 @@ def fnWriteBlock(connection: CardConnection, nBlockThrowCard: int, data: list[by
         return False
 
 
-def fnReadBlock(connection: CardConnection, nBlockThrowCard: int, count: int = 0x10):
+def fnReadBlock(connection: CardConnection, nBlockThrowCard: int):
     """
     Read data from a block on the MIFARE card.
     
@@ -160,9 +160,7 @@ def fnReadBlock(connection: CardConnection, nBlockThrowCard: int, count: int = 0
         nBlockThrowCard: Absolute block number (0-63 for MIFARE 1K)
         count: Number of bytes to read (default 0x10 = 16 bytes for MIFARE 1K)
     
-    Returns:
-        tuple: (True, response_data) if read succeeded, (False, None) otherwise
+    Returns: tuple: (True, response_data) if read succeeded, (False, None) otherwise
     """
     # APDU: [CLA, INS, P1, BlockAddr, Length]
-    #Result, responce = fnDoTransmit(connection, [0xFF, 0xB0, 0x00, nBlockThrowCard, count])
     return fnDoTransmit(connection, [0xFF, 0xB0, 0x00, nBlockThrowCard])
