@@ -1,3 +1,4 @@
+from pluggy import Result
 from smartcard.CardConnection import CardConnection
 
 def bytes2str(b) -> str:
@@ -65,11 +66,10 @@ def fnLoadKey(connection: CardConnection, keyData: list[bytes]) -> bool:
     - KeyData: The actual key bytes to load
     """
     # APDU: [CLA, INS, P1, P2, Lc, KeyData...]
-    if fnDoTransmit(connection, [0xFF, 0x82, 0x00, 0x00, len(keyData)] + list(keyData)):
-        return True
-    else:
+    Result, _ = fnDoTransmit(connection, [0xFF, 0x82, 0x00, 0x00, len(keyData)] + list(keyData)) 
+    if not Result:
         print(f"fail to load key: {bytes2str(keyData)}")
-        return False
+    return Result
 
 
 def fnSelectBlock(connection: CardConnection, nBlockThrowCard: int, keyTypeAB: str) -> bool:
@@ -103,11 +103,11 @@ def fnSelectBlock(connection: CardConnection, nBlockThrowCard: int, keyTypeAB: s
     # Determine key type: 0x00 for Key A, 0x01 for Key B
     keyID = 0x00 if keyTypeAB.upper() == 'A' else 0x01
     # APDU: [CLA, INS, P1, P2, Lc, KeyType, KeyStruct, BlockAddr, AuthMode, Param]
-    if fnDoTransmit(connection, [0xFF, 0x86, 0x00, 0x00, 0x05, keyID, 0x00, nBlockThrowCard, 0x60, 0x00]):    
-        return True
-    else:
+
+    Result, _ = fnDoTransmit(connection, [0xFF, 0x86, 0x00, 0x00, 0x05, keyID, 0x00, nBlockThrowCard, 0x60, 0x00])
+    if not Result:    
         print(f"Authentication failed by key{keyTypeAB} for block:{nBlockThrowCard//4}:{nBlockThrowCard%4}")
-        return False
+    return Result
 
 
 def fnWriteBlock(connection: CardConnection, nBlockThrowCard: int, data: list[bytes]) -> bool:
@@ -134,12 +134,10 @@ def fnWriteBlock(connection: CardConnection, nBlockThrowCard: int, data: list[by
         bool: True if write succeeded, False otherwise
     """
     # APDU: [CLA, INS, P1, BlockAddr, Lc, Data...]
-    if fnDoTransmit(connection, [0xFF, 0xD6, 0x00, nBlockThrowCard, len(data)] + data):
-        return True
-    else:
+    Result, _ = fnDoTransmit(connection, [0xFF, 0xD6, 0x00, nBlockThrowCard, len(data)] + data)
+    if not Result:
         print(f"fail to write block: {nBlockThrowCard//4}:{nBlockThrowCard%4}")
-        return False
-
+    return Result
 
 def fnReadBlock(connection: CardConnection, nBlockThrowCard: int):
     """
