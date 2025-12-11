@@ -111,12 +111,14 @@ def fnWrite(connection: CardConnection, writeData: do_prompt.PromptAnswer_ForWri
     # For A_SECTOR: start at first block of the sector
     nStartBlock = 1 #otherwise - first writable block of first sector
     match writeData.address:
-        case do_prompt.writeAddress.A_BLOCK : nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector + writeData.nBlock
-        case do_prompt.writeAddress.A_SECTOR: nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector
-
+        case do_prompt.writeAddress.A_BLOCK :
+            nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector + writeData.nBlock
+        case do_prompt.writeAddress.A_SECTOR:
+            #first block of first sector is special
+            if writeData.nSector != 0:
+                nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector
     try:
         # absolute block number from start of card
-        nStartBlock = writeData.nSector * card_data.MIFARE_1K_blocks_per_sector + writeData.nBlock #global block от начала карты
         startNewSector = True # Track if we're entering a new sector (requires authentication)
         totalBlocksToWrite = dataLen // card_data.MIFARE_1K_bytes_per_block 
         totalBlockWritten = 0

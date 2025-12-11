@@ -225,6 +225,18 @@ def askKey_FromTerminal(keyLength: int, cancelEvent: threading.Event) -> (bool, 
 
 
 #=========================================================================================================
+def __countDataSize(nSectorCount: int, nBlockCount: int, nBlockSize: int, answer: PromptAnswer_ForWrite) -> int:
+    match answer.address:
+        case writeAddress.A_BLOCK:
+            return nBlockSize
+        case writeAddress.A_SECTOR:
+            #first sector contains card ID and access information
+            return nBlockSize *  (nBlockCount - 1 if answer.nSector != 0 else 2)
+        case writeAddress.A_ALL:
+            #-1 because first block of sector is special and last block of each sector is access information
+            return nBlockSize * ((nBlockCount - 1)* nSectorCount - 1)
+    return 0    #should not happen
+
 promptStrData = "--- Select data type ---   \n1) String (default)\n2) User Data\n3) Zeros\n4) Random\n (1-4)?:"
 promptStrAddr = "--- Select data address ---\n1) Block (default)\n2) Sector\n3) Entire card\n (1-3)?:"
 
@@ -256,6 +268,8 @@ def fnAskWrite(nSectorCount: int, nBlockCount: int, nBlockSize: int, cancelEvent
                     isOk and print(f"Selected: Block {answer.nBlock} in Sector {answer.nSector}")
                 case writeAddress.A_SECTOR:
                     isOk = askConfirmWrite_FromTerminal(f"Writing to entire sector {answer.nSector}...", cancelEvent)
+                    if isOk:
+                        answer.nBlock = 0 if answer.nSector != 0 else 1 #first block of sector is special
     
     if isOk:
         match answer.dataType:
@@ -264,21 +278,9 @@ def fnAskWrite(nSectorCount: int, nBlockCount: int, nBlockSize: int, cancelEvent
             case writeDatType.W_DATA: # Request data for user data type
                 answer.data = askHexData_FromTerminal(nBlockSize, cancelEvent)
             case writeDatType.W_ZERO: # Generate data for zeros type
-                match answer.address:
-                    case writeAddress.A_BLOCK:
-                        answer.data = bytearray(nBlockSize)
-                    case writeAddress.A_SECTOR:
-                        answer.data = bytearray(nBlockSize * (nBlockCount - 1))
-                    case writeAddress.A_ALL:
-                        answer.data = bytearray(nBlockSize * (nBlockCount - 1) * nSectorCount)
+                answer.data = bytearray(__countDataSize(nSectorCount, nBlockCount, nBlockSize, answer))
             case writeDatType.W_RAND: # Generate data for random type
-                match answer.address:
-                    case writeAddress.A_BLOCK:
-                        answer.data = os.urandom(nBlockSize)
-                    case writeAddress.A_SECTOR:
-                        answer.data = os.urandom(nBlockSize * (nBlockCount - 1))
-                    case writeAddress.A_ALL:
-                        answer.data = os.urandom(nBlockSize * (nBlockCount - 1)* nSectorCount)
+                answer.data = os.urandom(__countDataSize(nSectorCount, nBlockCount, nBlockSize, answer))
     if len(answer.data) > 0:
         return True, answer
     return False, None
